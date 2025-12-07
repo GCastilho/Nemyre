@@ -16,9 +16,10 @@ struct Coordinates {
 }
 
 /// Conexão entre neurônios (e de neurônios <-> nervos)
+#[derive(Debug, Clone)]
 struct Synapse {
     with: usize,
-    weight: f64,
+    weight: f64, // TODO: Max value is 1
 }
 
 struct PreviousAction {
@@ -36,6 +37,7 @@ struct Neuron {
 /// Input receptor from the system
 ///
 /// Converts excitation value into synapses to connected neurons. For now that is linear
+/// TODO: Será necessário poder setar a frequência ou os pulsos diretamente (ex: pulsos randômicos)
 struct SensoryReceptor {
     excitation: u8, // TODO: Esse é o melhor nome?
     coordinates: Coordinates,
@@ -71,8 +73,12 @@ impl SensoryReceptor {
             return false; // Não dispara
         }
 
-        // TODO: Implementar disparo. Da onde vem a força? Se retornar a força o caller faz as
-        // fn calls para implementar o disparo
+        // TODO: Implementar disparo. Da onde vem a força?
+        /*
+         * 2 Opções:
+         *  - Chamar a fn q transmite a mensagem daqui
+         *  - Retornar o valor da FORÇA da sinapse dessa fn e o caller transmitir a mensagem
+         */
         println!("PLACEHOLDER PARA O DISPARO");
         self.last_tick_fired = tick;
         true
@@ -88,6 +94,30 @@ struct MotorNerve {
 }
 
 fn main() {
+    let mut receptors = Vec::new();
+    for _ in 0..110 {
+        let coordinates = Coordinates {
+            x: random_range(0.0..10.0),
+            y: random_range(0.0..10.0),
+            z: random_range(0.0..10.0),
+        };
+        let mut axon = random_iter()
+            .filter(|v| *v < 1000)
+            .take(11)
+            .collect::<Vec<u16>>();
+        axon.dedup();
+        let axon = axon
+            .into_iter()
+            .map(|with| Synapse {
+                with: with as usize,
+                weight: random_range(0.0..1.0),
+            })
+            .collect();
+        let mut receptor = SensoryReceptor::new(20, coordinates);
+        receptor.axon = axon;
+        receptors.push(receptor);
+    }
+
     let mut neurons = Vec::new();
     for _ in 0..1000 {
         let coordinates = Coordinates {
@@ -95,14 +125,15 @@ fn main() {
             y: random_range(0.0..10.0),
             z: random_range(0.0..10.0),
         };
-        let mut axon = random_iter().take(110).collect::<Vec<u64>>();
+        let mut axon = random_iter()
+            .filter(|v| *v < 1000)
+            .take(110)
+            .collect::<Vec<u16>>();
         axon.dedup();
         let axon = axon
             .into_iter()
             .map(|with| Synapse {
-                with: with
-                    .try_into()
-                    .expect("must be able to convert u64 to usize"),
+                with: with as usize,
                 weight: random_range(0.0..1.0),
             })
             .collect();
@@ -116,12 +147,27 @@ fn main() {
         neurons.push(neuron);
     }
 
-    #[allow(unused)]
     let mut tick: u64 = 0;
     let tick_min_duration = Duration::from_millis(TICKS_PER_SECOND as u64 / 1000);
     loop {
         tick += 1;
         let now = Instant::now();
+
+        // Seta a excitação dos receptores
+        // Atualiza os receptores
+        for (i, receptor) in receptors.iter_mut().enumerate() {
+            receptor.excitation = random_range(118..138);
+            if receptor.update(tick) {
+                let connected_axons = &receptor.axon;
+                // O valor do Potencial de Ação, multiplicado pelo weight, é enviado para o with
+                println!(
+                    "Receptor {i} mandando para {:?}",
+                    connected_axons.iter().map(|v| v.with).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        // Manda sinapses pros neurônios
 
         let tick_duration_left = tick_min_duration
             .checked_sub(now.elapsed())
