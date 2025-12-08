@@ -22,6 +22,14 @@ struct Synapse {
     weight: f64, // TODO: Max value is 1
 }
 
+/// Signal received on last tick
+#[derive(Debug)]
+struct Action {
+    with: usize,
+    strength: f64,
+}
+
+/// Action processed/received in a previous tick, kept for Synapse adjustment upon new Action
 struct PreviousAction {
     with: usize,
     tick: u64,
@@ -29,6 +37,7 @@ struct PreviousAction {
 
 struct Neuron {
     potential: f64,
+    actions: Vec<Action>,
     previous_actions: VecDeque<PreviousAction>,
     coordinates: Coordinates,
     axon: Vec<Synapse>,
@@ -60,28 +69,25 @@ impl SensoryReceptor {
 
     // TODO: O ideal é que o tick seja acessível globalmente de alguma forma
     // TODO: N sei se update é o melhor nome
-    // TODO: Add easing function to change period soothly
-    fn update(&mut self, tick: u64) -> bool {
-        let period = match self.excitation {
-            0 => return false, // Não dispara
+    // TODO: Add easing function to change period smoothly
+    /// Process receptor excitation into an action strength
+    ///
+    /// Returns [`None`] if receptor shouldn't fire
+    /// Returns [`Some(t)`] with the strength the receptor fired the Action Potential
+    fn update(&mut self, tick: u64) -> Option<f64> {
+        match self.excitation {
+            0 => None,
             n => {
                 let period = (u8::MAX as u32 * self.min_period) as f64 / n as f64;
-                period.round() as u64
+                Some(period.round() as u64)
             }
-        };
-        if tick < self.last_tick_fired + period {
-            return false; // Não dispara
         }
-
-        // TODO: Implementar disparo. Da onde vem a força?
-        /*
-         * 2 Opções:
-         *  - Chamar a fn q transmite a mensagem daqui
-         *  - Retornar o valor da FORÇA da sinapse dessa fn e o caller transmitir a mensagem
-         */
-        println!("PLACEHOLDER PARA O DISPARO");
-        self.last_tick_fired = tick;
-        true
+        .filter(|period| self.last_tick_fired + period <= tick)
+        .map(|_| {
+            self.last_tick_fired = tick;
+            // TODO: Implementar disparo. Da onde vem a força?
+            1.0
+        })
     }
 }
 
@@ -140,6 +146,7 @@ fn main() {
 
         let neuron = Neuron {
             potential: 0.0,
+            actions: Vec::new(),
             previous_actions: VecDeque::new(),
             coordinates,
             axon,
@@ -153,21 +160,32 @@ fn main() {
         tick += 1;
         let now = Instant::now();
 
+        // TODO: Array de actions deve ser limpo qdo o neurônio processá-las
+        let mut fired_actions = Vec::new();
+
         // Seta a excitação dos receptores
         // Atualiza os receptores
-        for (i, receptor) in receptors.iter_mut().enumerate() {
+        for receptor in &mut receptors {
             receptor.excitation = random_range(118..138);
-            if receptor.update(tick) {
-                let connected_axons = &receptor.axon;
+            if let Some(strength) = receptor.update(tick) {
                 // O valor do Potencial de Ação, multiplicado pelo weight, é enviado para o with
-                println!(
-                    "Receptor {i} mandando para {:?}",
-                    connected_axons.iter().map(|v| v.with).collect::<Vec<_>>()
-                );
+                let actions = receptor.axon.iter().map(|a| Action {
+                    with: a.with,
+                    strength: a.weight * strength,
+                });
+                fired_actions.extend(actions);
             }
         }
 
+        // Processa os neurônios
+
         // Manda sinapses pros neurônios
+        for action in fired_actions {
+            let neuron = neurons
+                .get_mut(action.with)
+                .unwrap_or_else(|| panic!("Fail to find neuron for action {:?}", action));
+            neuron.actions.push(action);
+        }
 
         let tick_duration_left = tick_min_duration
             .checked_sub(now.elapsed())
@@ -192,8 +210,8 @@ mod sensory_tests {
         let mut receptor = SensoryReceptor::new(max_frequency, COORDINATES);
         receptor.excitation = 255;
 
-        assert!(!receptor.update(1));
-        assert!(receptor.update(50));
+        assert!(receptor.update(1).is_none());
+        assert!(receptor.update(50).is_some());
         assert_eq!(receptor.last_tick_fired, 50);
     }
 
@@ -203,8 +221,8 @@ mod sensory_tests {
         let mut receptor = SensoryReceptor::new(max_frequency, COORDINATES);
         receptor.excitation = 128;
 
-        assert!(!receptor.update(50));
-        assert!(receptor.update(100));
+        assert!(receptor.update(50).is_none());
+        assert!(receptor.update(100).is_some());
         assert_eq!(receptor.last_tick_fired, 100);
     }
 
@@ -214,7 +232,7 @@ mod sensory_tests {
         let mut receptor = SensoryReceptor::new(max_frequency, COORDINATES);
         receptor.excitation = 74;
 
-        assert!(!receptor.update(171));
-        assert!(receptor.update(172));
+        assert!(receptor.update(171).is_none());
+        assert!(receptor.update(172).is_some());
     }
 }
