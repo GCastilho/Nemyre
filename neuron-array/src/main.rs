@@ -8,6 +8,7 @@ use std::{
 };
 
 const TICKS_PER_SECOND: u32 = 1000;
+const MINIMUM_POTENTIAL: f64 = 100.0;
 
 struct Coordinates {
     x: f64,
@@ -26,7 +27,7 @@ struct Synapse {
 #[derive(Debug)]
 struct Action {
     with: usize,
-    strength: f64,
+    value: f64,
 }
 
 /// Action processed/received in a previous tick, kept for Synapse adjustment upon new Action
@@ -41,6 +42,24 @@ struct Neuron {
     previous_actions: VecDeque<PreviousAction>,
     coordinates: Coordinates,
     axon: Vec<Synapse>,
+}
+
+impl Neuron {
+    // TODO: A força da conexão é controlada pelo recebedor, não por quem envia. Quem envia controla
+    // a força do disparo
+    pub fn update(&mut self, tick: u64) {
+        let potential_received = self.actions.iter().map(|a| a.value).sum::<f64>();
+        self.potential += potential_received;
+
+        if self.potential < MINIMUM_POTENTIAL {
+            return;
+        }
+
+        self.actions
+            .iter()
+            .map(|a| PreviousAction { with: a.with, tick })
+            .for_each(|pa| self.previous_actions.push_back(pa));
+    }
 }
 
 /// Input receptor from the system
@@ -171,13 +190,16 @@ fn main() {
                 // O valor do Potencial de Ação, multiplicado pelo weight, é enviado para o with
                 let actions = receptor.axon.iter().map(|a| Action {
                     with: a.with,
-                    strength: a.weight * strength,
+                    value: a.weight * strength,
                 });
                 fired_actions.extend(actions);
             }
         }
 
         // Processa os neurônios
+        for neuron in &mut neurons {
+            neuron.update(tick);
+        }
 
         // Manda sinapses pros neurônios
         for action in fired_actions {
