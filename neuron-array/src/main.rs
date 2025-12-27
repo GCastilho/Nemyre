@@ -11,36 +11,33 @@ use std::{
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 struct ReceptorId(usize);
 
-impl<T> Index<ReceptorId> for Vec<T> {
-    type Output = T;
-
-    fn index(&self, index: ReceptorId) -> &Self::Output {
-        &self[index.0]
-    }
-}
-
-impl<T> IndexMut<ReceptorId> for Vec<T> {
-    fn index_mut(&mut self, index: ReceptorId) -> &mut Self::Output {
-        &mut self[index.0]
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 struct NeuronId(usize);
 
-impl<T> Index<NeuronId> for Vec<T> {
-    type Output = T;
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+struct MotorNerveId(usize);
 
-    fn index(&self, index: NeuronId) -> &Self::Output {
-        &self[index.0]
-    }
+macro_rules! impl_indexable_id {
+    ($id_type:ty) => {
+        impl<T> Index<$id_type> for Vec<T> {
+            type Output = T;
+
+            fn index(&self, index: $id_type) -> &Self::Output {
+                &self[index.0]
+            }
+        }
+
+        impl<T> IndexMut<$id_type> for Vec<T> {
+            fn index_mut(&mut self, index: $id_type) -> &mut Self::Output {
+                &mut self[index.0]
+            }
+        }
+    };
 }
 
-impl<T> IndexMut<NeuronId> for Vec<T> {
-    fn index_mut(&mut self, index: NeuronId) -> &mut Self::Output {
-        &mut self[index.0]
-    }
-}
+impl_indexable_id!(ReceptorId);
+impl_indexable_id!(NeuronId);
+impl_indexable_id!(MotorNerveId);
 
 const TICKS_PER_SECOND: u32 = 1000;
 const MINIMUM_POTENTIAL: f64 = 100.0;
@@ -71,27 +68,56 @@ enum SenderId {
     Neuron(NeuronId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ReceiverId {
+    Neuron(NeuronId),
+    MotorNerve(MotorNerveId),
+}
+
 /// Mantém as conexões entre os neurônios (e de neurônios <-> nervos) assim como a força da conexão para o recebedor (ω)
 struct Dispatcher {
-    // SenderId (Receptor or Neuron), Receiver, receiver strength (ω)
-    connections: HashMap<(SenderId, NeuronId), f64>,
-    // Vec of inboxes, one for each neuron
+    /// SenderId (Receptor or Neuron), ReceiverId (Neuron, Nerve), receiver strength (ω)
+    ///
+    /// There MUST NOT be a direct connection between a Receptor and a Nerve
+    connections: HashMap<(SenderId, ReceiverId), f64>,
+    /// Vec of inboxes: [neurons...][motor_nerves...]
+    /// Index 0 to neuron_count-1 -> neurons
+    /// Index neuron_count to neuron_count+nerve_count-1 -> motor nerves
     inboxes: Vec<Vec<Action>>,
+    neuron_count: usize,
 }
 
 impl Dispatcher {
-    pub fn new(neuron_count: usize) -> Self {
+    pub fn new(neuron_count: usize, nerve_count: usize) -> Self {
         Self {
             connections: HashMap::new(),
-            inboxes: vec![Vec::new(); neuron_count],
+            inboxes: vec![Vec::new(); neuron_count + nerve_count],
+            neuron_count,
         }
     }
 
-    pub fn connect(&mut self, from: SenderId, to: NeuronId, weight: f64) {
-        self.connections.insert((from, to), weight);
+    /// Converts a ReceiverId to the corresponding index in the inboxes Vec.
+    ///
+    /// Neurons are stored at indices [0..neuron_count), while MotorNerves
+    /// are stored at indices [neuron_count..neuron_count+nerve_count).
+    fn receiver_index(&self, receiver: ReceiverId) -> usize {
+        match receiver {
+            ReceiverId::Neuron(NeuronId(id)) => id,
+            ReceiverId::MotorNerve(MotorNerveId(id)) => self.neuron_count + id,
+        }
     }
 
-    pub fn disconnect(&mut self, from: SenderId, to: NeuronId) {
+    pub fn connect_sender_to_neuron(&mut self, from: SenderId, to: NeuronId, weight: f64) {
+        self.connections
+            .insert((from, ReceiverId::Neuron(to)), weight);
+    }
+
+    pub fn connect_neuron_to_nerve(&mut self, from: NeuronId, to: MotorNerveId, weight: f64) {
+        self.connections
+            .insert((SenderId::Neuron(from), ReceiverId::MotorNerve(to)), weight);
+    }
+
+    pub fn disconnect(&mut self, from: SenderId, to: ReceiverId) {
         self.connections.remove(&(from, to));
     }
 
@@ -99,9 +125,10 @@ impl Dispatcher {
     // Vec<Vec<f64>>, q pode ser feito usando só um Vec, permite tempo constante mas gasta mto espaço pq
     // poucos neurônios se conectam com outros neurônios pq é uma conexão local na maioria das vezes
     pub fn send(&mut self, from: SenderId, value: f64) {
-        for (&(f, t), &weight) in self.connections.iter() {
-            if f == from {
-                self.inboxes[t].push(Action {
+        for (&(s, receiver), &weight) in self.connections.iter() {
+            if s == from {
+                let idx = self.receiver_index(receiver);
+                self.inboxes[idx].push(Action {
                     with: from,
                     value: value * weight,
                 });
@@ -110,8 +137,9 @@ impl Dispatcher {
     }
 
     // TODO: Retornar um iterator (usando internal mutability) em um VecDeque evita realocação
-    pub fn drain_inbox(&mut self, id: NeuronId) -> Vec<Action> {
-        std::mem::take(&mut self.inboxes[id])
+    pub fn drain_inbox(&mut self, receiver: ReceiverId) -> Vec<Action> {
+        let idx = self.receiver_index(receiver);
+        std::mem::take(&mut self.inboxes[idx])
     }
 }
 
@@ -241,7 +269,8 @@ fn main() {
         .iter()
         .map(|r| SenderId::Receptor(r.id))
         .chain(neurons.iter().map(|n| SenderId::Neuron(n.id)));
-    let mut dispatcher = Dispatcher::new(neuron_count);
+    let nerve_count = 0; // TODO: Create motor nerves
+    let mut dispatcher = Dispatcher::new(neuron_count, nerve_count);
     for sender in senders {
         let sampled = sample(
             &mut rand::rng(),
@@ -249,7 +278,11 @@ fn main() {
             (0.15 * neuron_count as f64) as usize, // Connected to 15% of each
         );
         for neuron_to in sampled.into_iter() {
-            dispatcher.connect(sender, NeuronId(neuron_to), random_range(0.0..1.0));
+            dispatcher.connect_sender_to_neuron(
+                sender,
+                NeuronId(neuron_to),
+                random_range(0.0..1.0),
+            );
         }
     }
 
@@ -271,7 +304,7 @@ fn main() {
 
         // Processa os neurônios
         for neuron in &mut neurons {
-            let actions = dispatcher.drain_inbox(neuron.id);
+            let actions = dispatcher.drain_inbox(ReceiverId::Neuron(neuron.id));
             if let Some(strength) = neuron.update(tick, &actions) {
                 dispatcher.send(SenderId::Neuron(neuron.id), strength);
             }
